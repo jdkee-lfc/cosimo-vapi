@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "cosimo-vapi"
+version = "0.2.0"
+description = "Cosimo — AI Museum Docent (Vapi Cloud Edition)"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Vapi client SDK (handles mic → cloud → speaker)
+    "vapi-python>=0.1.9",
+    # Vapi server SDK (creates assistant + knowledge base)
+    "vapi>=0.3",
+    # Wake word detection
+    "pvporcupine>=3.0",
+    # Audio for wake word listener
+    "sounddevice>=0.5",
+    "numpy>=1.26",
+    # Config
+    "python-dotenv>=1.0",
+    "rich>=13.7",
+]
+
+[project.scripts]
+cosimo = "cosimo_vapi.client:main"
+cosimo-setup = "cosimo_vapi.setup_assistant:main"
+cosimo-test-audio = "cosimo_vapi.test_audio:main"
