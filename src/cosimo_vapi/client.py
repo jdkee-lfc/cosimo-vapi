@@ -102,6 +102,9 @@ class WakeWordDetector:
         )
 
         with stream:
+            sd.sleep(500)  # Discard 500ms of stale audio
+            detected = False  # Reset in case stale audio triggered it
+            buffer = b""     # Clear buffer
             while not detected:
                 sd.sleep(100)
 
@@ -118,76 +121,41 @@ class WakeWordDetector:
 # ---------------------------------------------------------------------------
 
 class VapiCallManager:
-    """Manages a single Vapi voice call session."""
+    """Runs each Vapi call in a subprocess for clean Daily context."""
 
     def __init__(self, public_key: str, assistant_id: str):
         self.public_key = public_key
         self.assistant_id = assistant_id
-        self._vapi = None
-        self._call_active = False
-        self._call_ended_event = None
+        self._proc = None
 
     def start_call(self):
-        """Start a Vapi web call — mic and speaker are handled by the SDK."""
-        from vapi_python import Vapi
-
-        self._call_ended_event = asyncio.Event() if asyncio.get_event_loop().is_running() else None
-        self._call_active = True
-
-        self._vapi = Vapi(api_key=self.public_key)
-
-        # Register event handlers
-        self._vapi.on("call-start", self._on_call_start)
-        self._vapi.on("call-end", self._on_call_end)
-        self._vapi.on("speech-start", self._on_speech_start)
-        self._vapi.on("speech-end", self._on_speech_end)
-        self._vapi.on("error", self._on_error)
-        self._vapi.on("message", self._on_message)
-
+        """Launch the call in a subprocess."""
+        import subprocess as sp
+        worker = Path(__file__).parent / "call_worker.py"
+        self._proc = sp.Popen(
+            [sys.executable, str(worker), self.public_key, self.assistant_id],
+        )
         console.print("[bold blue]Starting Vapi call...[/]")
-        self._vapi.start(assistant_id=self.assistant_id)
-
-    def _on_call_start(self):
+        time.sleep(2)  # Give it time to connect
         console.print("[green]✦ Call connected — Cosimo is speaking[/]")
-        self._call_active = True
-
-    def _on_call_end(self):
-        console.print("[dim]Call ended[/]")
-        self._call_active = False
-
-    def _on_speech_start(self):
-        console.print("[dim]  ◈ Cosimo speaking...[/]")
-
-    def _on_speech_end(self):
-        console.print("[dim]  ◇ Cosimo finished[/]")
-
-    def _on_error(self, error):
-        console.print(f"[red]  ✗ Vapi error: {error}[/]")
-        self._call_active = False
-
-    def _on_message(self, message):
-        msg_type = message.get("type", "")
-        if msg_type == "transcript":
-            role = message.get("role", "")
-            text = message.get("transcript", "")
-            if role == "user" and text.strip():
-                console.print(f"  [cyan]Visitor:[/] {text}")
-            elif role == "assistant" and text.strip():
-                console.print(f"  [green]Cosimo:[/] {text}")
 
     def wait_for_end(self):
-        """Block until the call ends (Vapi handles silence timeout)."""
-        while self._call_active:
-            time.sleep(0.5)
+        """Block until the subprocess dies."""
+        console.print("\n[dim]Conversation active...[/]")
+        if self._proc:
+            self._proc.wait()
+        console.print("[dim]Session ending...[/]")
 
     def stop(self):
-        """Manually end the call."""
-        if self._vapi:
+        """Kill the subprocess."""
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
             try:
-                self._vapi.stop()
-            except Exception:
-                pass
-        self._call_active = False
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        self._proc = None
+        console.print("[dim]Call ended[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +217,13 @@ class Cosimo:
 
                 # ACTIVE state — run Vapi call
                 self.call_manager = VapiCallManager(self.public_key, self.assistant_id)
-                self.call_manager.start_call()
-                self.call_manager.wait_for_end()
+                try:
+                    self.call_manager.start_call()
+                    self.call_manager.wait_for_end()
+                finally:
+                    self.call_manager.stop()
+                    self.call_manager = None
+                    time.sleep(2)  # Let mic fully release from subprocess
 
                 console.print("[dim]Session ended — returning to wake word mode[/]\n")
                 time.sleep(1)  # Brief pause between sessions
