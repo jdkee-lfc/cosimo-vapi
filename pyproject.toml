@@ -13,8 +13,8 @@ dependencies = [
     "vapi-python>=0.1.9",
     # Vapi server SDK (creates assistant + knowledge base)
     "vapi-server-sdk>=0.3",
-    # Wake word detection
-    "pvporcupine>=3.0",
+    # Wake word detection (open source, no account needed)
+    "openwakeword>=0.6",
     # Audio for wake word listener
     "sounddevice>=0.5",
     "numpy>=1.26",

@@ -4,7 +4,7 @@ This is the thin local layer that runs on the Mac Studio kiosk.
 All speech recognition, LLM reasoning, and text-to-speech happen
 in the cloud via Vapi. Locally we only handle:
 
-  1. Always-on wake word detection ("Cosimo") via Porcupine
+  1. Always-on wake word detection via OpenWakeWord (open source, no account needed)
   2. Starting/stopping Vapi web calls via the Python client SDK
   3. Monitoring call state for session lifecycle
 
@@ -14,22 +14,64 @@ State machine:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import signal
-import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
-import pvporcupine
+import openwakeword
+from openwakeword.model import Model as OWWModel
 import sounddevice as sd
+import torch
+import torchaudio
 from dotenv import load_dotenv
 from rich.console import Console
 
 console = Console()
+
+# Default wake word - can be changed in .env via WAKE_WORD setting
+DEFAULT_WAKE_WORD = "hey_cosimo"
+SAMPLE_RATE = 16000
+FRAME_SIZE = 1280  # 80ms at 16kHz
+
+
+# ---------------------------------------------------------------------------
+# Custom wake word model (trained locally)
+# ---------------------------------------------------------------------------
+
+class CustomWakeWordModel(torch.nn.Module):
+    """Simple CNN model for wake word detection."""
+
+    def __init__(self):
+        super().__init__()
+        self.mel_spec = torchaudio.transforms.MelSpectrogram(
+            sample_rate=16000, n_fft=512, hop_length=160, n_mels=40
+        )
+        self.conv1 = torch.nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.conv2 = torch.nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = torch.nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.pool = torch.nn.AdaptiveAvgPool2d((4, 4))
+        self.fc1 = torch.nn.Linear(64 * 4 * 4, 64)
+        self.fc2 = torch.nn.Linear(64, 1)
+        self.relu = torch.nn.ReLU()
+
+    def forward(self, x):
+        x = self.mel_spec(x)
+        x = torch.log(x + 1e-9)
+        x = x.unsqueeze(1)
+        x = self.relu(self.conv1(x))
+        x = torch.nn.functional.max_pool2d(x, 2)
+        x = self.relu(self.conv2(x))
+        x = torch.nn.functional.max_pool2d(x, 2)
+        x = self.relu(self.conv3(x))
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.relu(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -37,83 +79,116 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 class WakeWordDetector:
-    """Listens continuously for 'Cosimo' using Picovoice Porcupine."""
+    """Listens continuously for wake word using custom model or OpenWakeWord."""
 
-    def __init__(self, access_key: str, keyword_path: str | None = None, sensitivity: float = 0.6):
-        self.access_key = access_key
-        self.keyword_path = keyword_path
-        self.sensitivity = sensitivity
-        self._porcupine: pvporcupine.Porcupine | None = None
+    def __init__(self, wake_word: str = DEFAULT_WAKE_WORD, model_path: str | None = None, threshold: float = 0.5):
+        self.wake_word = wake_word
+        self.model_path = model_path  # Path to custom .pt or .onnx model
+        self.threshold = threshold
+        self._model = None
+        self._custom_model = None  # For custom PyTorch model
+        self._use_custom = False
+        self._initialized = False
+        self._audio_buffer = []
 
     def _init(self):
-        if self._porcupine is not None:
+        if self._initialized:
             return
 
-        kw_path = self.keyword_path
-        if kw_path and Path(kw_path).exists():
-            console.print(f"  Wake word model: {kw_path}")
-            self._porcupine = pvporcupine.create(
-                access_key=self.access_key,
-                keyword_paths=[kw_path],
-                sensitivities=[self.sensitivity],
+        console.print("  [dim]Loading wake word models...[/]")
+
+        # Check for custom PyTorch model (.pt file)
+        if self.model_path and self.model_path.endswith('.pt') and Path(self.model_path).exists():
+            console.print(f"  [dim]Using custom PyTorch model: {self.model_path}[/]")
+            self._custom_model = CustomWakeWordModel()
+            self._custom_model.load_state_dict(
+                torch.load(self.model_path, weights_only=True, map_location='cpu')
+            )
+            self._custom_model.eval()
+            self._use_custom = True
+        # Check for custom ONNX model
+        elif self.model_path and Path(self.model_path).exists():
+            console.print(f"  [dim]Using custom model: {self.model_path}[/]")
+            self._model = OWWModel(
+                wakeword_models=[self.model_path],
+                inference_framework="onnx"
             )
         else:
-            if kw_path:
-                console.print(f"  [yellow]⚠ Custom model not found: {kw_path}[/]")
-            console.print("  [yellow]Using built-in 'computer' keyword for testing[/]")
-            console.print("  [dim]Generate 'Cosimo' at https://console.picovoice.ai/[/]")
-            self._porcupine = pvporcupine.create(
-                access_key=self.access_key,
-                keywords=["computer"],
-                sensitivities=[self.sensitivity],
-            )
+            # Download and use pre-trained models
+            openwakeword.utils.download_models()
+            self._model = OWWModel(inference_framework="onnx")
+
+        self._initialized = True
+        console.print(f"  Wake word: [bold]{self.wake_word.replace('_', ' ')}[/]")
 
     def listen(self) -> bool:
         """Block until wake word is detected. Returns True on detection."""
         self._init()
-        porcupine = self._porcupine
-        frame_length = porcupine.frame_length
-
-        buffer = b""
-        bytes_per_frame = frame_length * 2  # int16
-
         detected = False
+        self._audio_buffer = []
 
-        def callback(indata, frames, time_info, status):
-            nonlocal buffer, detected
-            if status:
-                pass  # ignore overflows silently in kiosk mode
-            pcm = (indata[:, 0] * 32767).astype(np.int16)
-            buffer += pcm.tobytes()
+        if self._use_custom:
+            # Use custom PyTorch model
+            def callback(indata, frames, time_info, status):
+                nonlocal detected
+                if status or detected:
+                    return
 
-            while len(buffer) >= bytes_per_frame:
-                frame_bytes = buffer[:bytes_per_frame]
-                buffer = buffer[bytes_per_frame:]
-                pcm_frame = struct.unpack_from(f"{frame_length}h", frame_bytes)
-                if porcupine.process(pcm_frame) >= 0:
-                    detected = True
+                # Accumulate audio (need 1 second = 16000 samples)
+                self._audio_buffer.extend(indata[:, 0].tolist())
+
+                # Keep only last 1 second
+                if len(self._audio_buffer) > 16000:
+                    self._audio_buffer = self._audio_buffer[-16000:]
+
+                # Only predict when we have enough audio
+                if len(self._audio_buffer) >= 16000:
+                    audio = torch.FloatTensor(self._audio_buffer[-16000:]).unsqueeze(0)
+                    with torch.no_grad():
+                        prob = self._custom_model(audio).item()
+                    if prob > self.threshold:
+                        detected = True
+                        return
+        else:
+            # Use OpenWakeWord model
+            model = self._model
+
+            def callback(indata, frames, time_info, status):
+                nonlocal detected
+                if status or detected:
+                    return
+
+                pcm = (indata[:, 0] * 32767).astype(np.int16)
+                predictions = model.predict(pcm)
+
+                for name, score in predictions.items():
+                    if self.wake_word in name.lower() and score > self.threshold:
+                        detected = True
+                        return
 
         stream = sd.InputStream(
-            samplerate=porcupine.sample_rate,
+            samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
-            blocksize=frame_length,
+            blocksize=FRAME_SIZE,
             callback=callback,
         )
 
         with stream:
             sd.sleep(500)  # Discard 500ms of stale audio
-            detected = False  # Reset in case stale audio triggered it
-            buffer = b""     # Clear buffer
+            detected = False  # Reset
+            self._audio_buffer = []
+            if not self._use_custom and self._model:
+                self._model.reset()
             while not detected:
                 sd.sleep(100)
 
         return True
 
     def cleanup(self):
-        if self._porcupine:
-            self._porcupine.delete()
-            self._porcupine = None
+        self._model = None
+        self._custom_model = None
+        self._initialized = False
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +245,8 @@ class Cosimo:
 
         self.public_key = os.getenv("VAPI_PUBLIC_KEY", "")
         self.assistant_id = os.getenv("VAPI_ASSISTANT_ID", "")
-        self.pv_key = os.getenv("PICOVOICE_ACCESS_KEY", "")
+        self.wake_word = os.getenv("WAKE_WORD", DEFAULT_WAKE_WORD)
+        self.wake_word_model = os.getenv("WAKE_WORD_MODEL", "")
 
         self.wake_detector: WakeWordDetector | None = None
         self.call_manager: VapiCallManager | None = None
@@ -196,18 +272,18 @@ class Cosimo:
             pass
 
         console.print(f"  Assistant: {self.assistant_id[:20]}...")
-        console.print(f"  Wake word: Cosimo")
+        console.print(f"  Wake word: {self.wake_word.replace('_', ' ')}")
         console.print()
 
         self.wake_detector = WakeWordDetector(
-            access_key=self.pv_key,
-            keyword_path=os.getenv("WAKE_WORD_PATH", "data/cosimo_wake_word.ppn"),
+            wake_word=self.wake_word,
+            model_path=self.wake_word_model if self.wake_word_model else None,
         )
 
         while not self._shutdown:
             try:
                 # IDLE state — listen for wake word
-                console.print("[dim]Listening for wake word...[/]  Say [bold]'Cosimo'[/]")
+                console.print("[dim]Listening for wake word...[/]  Say [bold]'Hey Cosimo'[/]")
                 detected = self.wake_detector.listen()
 
                 if not detected or self._shutdown:
@@ -244,8 +320,6 @@ class Cosimo:
             errors.append("VAPI_PUBLIC_KEY not set — get it at https://dashboard.vapi.ai/")
         if not self.assistant_id:
             errors.append("VAPI_ASSISTANT_ID not set — run cosimo-setup first")
-        if not self.pv_key:
-            errors.append("PICOVOICE_ACCESS_KEY not set — get it at https://console.picovoice.ai/")
 
         if errors:
             console.print("[bold red]Missing configuration:[/]\n")

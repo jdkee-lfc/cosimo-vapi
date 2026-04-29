@@ -1,0 +1,14 @@
+# =============================================================================
+# Cosimo — Vapi Cloud Edition
+# Copy to .env and fill in your values
+# =============================================================================
+
+# Vapi API keys — get these at https://dashboard.vapi.ai/
+VAPI_API_KEY=099ac012-93d9-41e1-8e61-75e02c3263b7
+VAPI_PUBLIC_KEY=5db4afc0-ed98-48ab-b248-3f59d8af50c6
+
+# Picovoice — get a free key at https://console.picovoice.ai/
+PICOVOICE_ACCESS_KEY=CGrgSJckjPkCp0pAlJfAAZ7VRzStkV4xzlYIC1XFGpsdfucnsBUdAQ==
+
+# Created by cosimo-setup (don't edit manually)
+VAPI_ASSISTANT_ID=

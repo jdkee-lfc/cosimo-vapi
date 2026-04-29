@@ -142,6 +142,21 @@ def create_assistant(token: str, tool_id: str) -> str:
         "maxDurationSeconds": 600,  # 10-minute max per session
         "backgroundSound": "off",
         "backchannelingEnabled": True,
+        # Enable endCall function so Cosimo can end calls gracefully on goodbye
+        "endCallFunctionEnabled": True,
+        # End call when user says these phrases
+        "endCallPhrases": [
+            "goodbye cosimo",
+            "goodbye",
+            "bye cosimo",
+            "bye bye",
+            "that's all",
+            "that's all thanks",
+            "i'm done",
+            "thank you goodbye",
+            "thanks bye",
+            "end call",
+        ],
         # Interruption handling
         "clientMessages": [
             "conversation-update",
@@ -205,6 +220,19 @@ def update_assistant(token: str, assistant_id: str, tool_id: str) -> str:
         "maxDurationSeconds": 600,
         "backgroundSound": "off",
         "backchannelingEnabled": True,
+        "endCallFunctionEnabled": True,
+        "endCallPhrases": [
+            "goodbye cosimo",
+            "goodbye",
+            "bye cosimo",
+            "bye bye",
+            "that's all",
+            "that's all thanks",
+            "i'm done",
+            "thank you goodbye",
+            "thanks bye",
+            "end call",
+        ],
     }
     data = api("PATCH", f"/assistant/{assistant_id}", token, json=payload)
     console.print(f"  [green]✓[/] Assistant updated")
