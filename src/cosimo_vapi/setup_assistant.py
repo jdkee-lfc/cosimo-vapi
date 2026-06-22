@@ -63,8 +63,8 @@ def upload_file(token: str, filepath: Path) -> str:
     return file_id
 
 
-def create_query_tool(token: str, file_id: str) -> str:
-    """Create a Query Tool with the uploaded file as knowledge base."""
+def create_query_tool(token: str, file_ids: list[str]) -> str:
+    """Create a Query Tool with the uploaded files as knowledge base."""
     console.print("  Creating knowledge base query tool...")
     payload = {
         "type": "query",
@@ -90,7 +90,7 @@ def create_query_tool(token: str, file_id: str) -> str:
         "knowledgeBases": [
             {
                 "provider": "google",
-                "fileIds": [file_id],
+                "fileIds": file_ids,
                 "name": "Museum Collection",
                 "description": (
                     "Complete catalog of the museum's collection including artworks, "
@@ -102,7 +102,7 @@ def create_query_tool(token: str, file_id: str) -> str:
     }
     data = api("POST", "/tool", token, json=payload)
     tool_id = data["id"]
-    console.print(f"  [green]✓[/] Query tool created: {tool_id}")
+    console.print(f"  [green]✓[/] Query tool created: {tool_id} (with {len(file_ids)} file(s))")
     return tool_id
 
 
@@ -116,7 +116,7 @@ def create_assistant(token: str, tool_id: str) -> str:
             "provider": "openai",
             "model": "gpt-4o",
             "temperature": 0.4,
-            "maxTokens": 300,
+            "maxTokens": 150,
             "messages": [
                 {
                     "role": "system",
@@ -195,7 +195,7 @@ def update_assistant(token: str, assistant_id: str, tool_id: str) -> str:
             "provider": "openai",
             "model": "gpt-4o",
             "temperature": 0.4,
-            "maxTokens": 300,
+            "maxTokens": 150,
             "messages": [
                 {
                     "role": "system",
@@ -243,7 +243,8 @@ def main():
     parser = argparse.ArgumentParser(description="Set up Cosimo on Vapi")
     parser.add_argument(
         "--collection", default="data/collection.json",
-        help="Path to museum collection JSON (default: data/collection.json)",
+        help="Path(s) to museum collection JSON files, comma-separated for multiple files "
+             "(default: data/collection.json). Example: --collection data/collection_paintings.json,data/collection_sculptures.json",
     )
     parser.add_argument("--reset", action="store_true", help="Create a new assistant even if one exists")
     args = parser.parse_args()
@@ -255,38 +256,52 @@ def main():
         console.print("  Get your API key at https://dashboard.vapi.ai/")
         sys.exit(1)
 
-    collection_path = Path(args.collection)
-    if not collection_path.exists():
-        console.print(f"[red]✗[/] Collection not found: {collection_path}")
-        console.print("  Place your museum collection JSON there, or use --collection PATH")
-        console.print("  See data/sample_collection.json for the expected format.")
-        sys.exit(1)
+    # Parse collection paths (comma-separated for multiple files)
+    collection_paths = [Path(p.strip()) for p in args.collection.split(",")]
 
-    # Validate JSON
-    with open(collection_path) as f:
-        data = json.load(f)
-    if isinstance(data, dict):
-        items = data.get("items", data.get("collection", data.get("objects", [])))
-    elif isinstance(data, list):
-        items = data
-    else:
-        items = []
+    # Validate all files exist
+    for collection_path in collection_paths:
+        if not collection_path.exists():
+            console.print(f"[red]✗[/] Collection not found: {collection_path}")
+            console.print("  Place your museum collection JSON there, or use --collection PATH")
+            console.print("  See data/sample_collection.json for the expected format.")
+            sys.exit(1)
+
     console.print(f"\n[bold]Cosimo — Vapi Setup[/]\n")
-    console.print(f"  Collection: {collection_path} ({len(items)} items, {collection_path.stat().st_size / 1024:.0f} KB)")
 
-    # Check file size — Vapi recommends < 300KB per file
-    file_size_kb = collection_path.stat().st_size / 1024
-    if file_size_kb > 300:
-        console.print(f"  [yellow]⚠ File is {file_size_kb:.0f} KB (Vapi recommends < 300KB for best retrieval)[/]")
-        console.print(f"  [yellow]  Consider splitting into multiple files if retrieval quality is low.[/]")
+    # Validate and report on each file
+    total_items = 0
+    total_size = 0
+    for collection_path in collection_paths:
+        with open(collection_path) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            items = data.get("items", data.get("collection", data.get("objects", [])))
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+
+        file_size_kb = collection_path.stat().st_size / 1024
+        total_items += len(items)
+        total_size += file_size_kb
+
+        status = "[green]OK[/]" if file_size_kb < 300 else "[yellow]>300KB[/]"
+        console.print(f"  {collection_path}: {len(items)} items, {file_size_kb:.0f} KB [{status}]")
+
+    if len(collection_paths) > 1:
+        console.print(f"  [bold]Total: {total_items} items across {len(collection_paths)} files, {total_size:.0f} KB[/]")
 
     console.print()
 
-    # Step 1: Upload file
-    file_id = upload_file(token, collection_path)
+    # Step 1: Upload all files
+    file_ids = []
+    for collection_path in collection_paths:
+        file_id = upload_file(token, collection_path)
+        file_ids.append(file_id)
 
     # Step 2: Create query tool / knowledge base
-    tool_id = create_query_tool(token, file_id)
+    tool_id = create_query_tool(token, file_ids)
 
     # Step 3: Create or update assistant
     existing_id = os.getenv("VAPI_ASSISTANT_ID", "").strip()

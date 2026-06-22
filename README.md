@@ -75,6 +75,29 @@ Place your collection at `data/collection.json`. Format:
 
 Or copy the sample to test with: `cp data/sample_collection.json data/collection.json`
 
+#### Optimizing large collections (recommended)
+
+Vapi recommends keeping knowledge base files under 300KB for best retrieval performance. If your collection is larger, use the split script:
+
+```bash
+python scripts/split_collection.py
+```
+
+This creates optimized files by:
+- Removing unnecessary fields (sourcePath, searchText, etc.)
+- Splitting by category into smaller files
+
+Output files:
+| File | Contents |
+|------|----------|
+| `collection_paintings_galleries.json` | Paintings in gallery spaces |
+| `collection_paintings_rooms.json` | Paintings in house rooms |
+| `collection_sculptures.json` | All sculptures |
+| `collection_furniture_other.json` | Furniture, textiles, decorative |
+| `collection_optimized.json` | All items, cleaned (single file) |
+
+The original `collection.json` is preserved.
+
 ### 5. Create the Vapi assistant
 
 ```bash
@@ -82,6 +105,22 @@ cosimo-setup
 ```
 
 This uploads your collection, creates a knowledge base, builds the Cosimo assistant with persona and voice, and saves the assistant ID to `.env`. Run it once, or again with `--reset` to recreate from scratch.
+
+#### Using split collection files
+
+To use the optimized split files (recommended for large collections):
+
+```bash
+cosimo-setup --collection data/collection_paintings_galleries.json,data/collection_paintings_rooms.json,data/collection_sculptures.json,data/collection_furniture_other.json --reset
+```
+
+Or use the single optimized file:
+
+```bash
+cosimo-setup --collection data/collection_optimized.json --reset
+```
+
+The `--reset` flag creates a fresh assistant with the new files and updated persona.
 
 ### 6. Generate the wake word
 
@@ -110,9 +149,12 @@ cosimo-vapi/
 ├── .env                    # API keys (git-ignored)
 ├── pyproject.toml          # Dependencies
 ├── data/
-│   ├── collection.json     # Your museum data (git-ignored)
+│   ├── collection.json     # Your museum data (original)
+│   ├── collection_*.json   # Split/optimized files (generated)
 │   ├── sample_collection.json
 │   └── cosimo_wake_word.ppn  # Porcupine model (git-ignored)
+├── scripts/
+│   └── split_collection.py # Split large collections for better RAG
 └── src/cosimo_vapi/
     ├── client.py           # Main loop: wake word → Vapi call → repeat
     ├── setup_assistant.py  # One-time: upload collection → create assistant
@@ -144,7 +186,18 @@ Edit the `model` block in `setup_assistant.py`. Vapi supports OpenAI, Anthropic,
 
 ### Update the collection
 
-Drop a new `data/collection.json` and re-run `cosimo-setup`. It uploads the new file and relinks the knowledge base.
+Drop a new `data/collection.json` and re-run:
+
+```bash
+# If using split files (recommended for large collections)
+python scripts/split_collection.py
+cosimo-setup --collection data/collection_paintings_galleries.json,data/collection_paintings_rooms.json,data/collection_sculptures.json,data/collection_furniture_other.json --reset
+
+# Or single file
+cosimo-setup --reset
+```
+
+This uploads the new files and relinks the knowledge base.
 
 ## Kiosk deployment
 
