@@ -4,26 +4,45 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cosimo-vapi"
-version = "0.2.0"
-description = "Cosimo — AI Museum Docent (Vapi Cloud Edition)"
+version = "0.3.0"
+description = "Cosimo — AI Museum Docent (Local FREE Edition + Vapi Cloud)"
 requires-python = ">=3.11"
 
 dependencies = [
-    # Vapi client SDK (handles mic → cloud → speaker)
-    "vapi-python>=0.1.9",
-    # Vapi server SDK (creates assistant + knowledge base)
-    "vapi-server-sdk>=0.3",
     # Wake word detection (open source, no account needed)
     "openwakeword>=0.6",
-    # Audio for wake word listener
+    # Audio
     "sounddevice>=0.5",
     "numpy>=1.26",
+    # PyTorch for custom wake word model
+    "torch>=2.0",
+    "torchaudio>=2.0",
     # Config
     "python-dotenv>=1.0",
     "rich>=13.7",
 ]
 
+[project.optional-dependencies]
+# For FREE local version (no cloud costs!)
+local = [
+    "faster-whisper>=1.0",  # Local speech-to-text (Whisper)
+    "ollama>=0.3",          # Local LLM
+    "edge-tts>=6.1",        # Free Microsoft TTS
+]
+# For Vapi cloud version (paid per-minute)
+vapi = [
+    "vapi-python>=0.1.9",
+    "vapi-server-sdk>=0.3",
+]
+# Install everything
+all = [
+    "cosimo-vapi[local,vapi]",
+]
+
 [project.scripts]
+# FREE local version (recommended)
+cosimo-local = "cosimo_vapi.client_local:main"
+# Vapi cloud version (paid)
 cosimo = "cosimo_vapi.client:main"
 cosimo-setup = "cosimo_vapi.setup_assistant:main"
 cosimo-test-audio = "cosimo_vapi.test_audio:main"
