@@ -7,5 +7,9 @@ __pycache__/
 !.env.example
 data/collection.json
 data/*.ppn
+# generated at startup by cosimo_vapi.knowledge
+data/catalog_index.txt
+data/embeddings.npy
+data/embeddings.meta.json
 logs/
 .DS_Store

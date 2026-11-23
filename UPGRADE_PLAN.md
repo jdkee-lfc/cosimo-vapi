@@ -150,9 +150,9 @@ at runtime (keep only in the wake-word training repo).
 ## 7. Mac Mini hardware (fill in)
 
 ```
-chip:
-memory:
-macOS:
+chip:   Apple M3 Ultra   (bfloat16 OK)
+memory: 256 GB unified
+macOS:  26.5
 ```
 
 ## 8. Acceptance checklist

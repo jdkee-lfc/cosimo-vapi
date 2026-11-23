@@ -1,5 +1,9 @@
 # Cosimo Local Setup Guide
 
+> **Outdated (2026-11-23).** This describes the interim Whisper / llama3.2:1b / edge-tts build.
+> For current setup, see `README.md`, and for `.env` settings, see `.env.example`. This guide will
+> be rewritten once Phase C of `UPGRADE_PLAN.md` lands.
+
 ## Welcome!
 
 This guide will help you set up **Cosimo**, our AI museum docent, using the **FREE local version**. This version runs entirely on your computer with no monthly costs.

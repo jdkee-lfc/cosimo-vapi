@@ -31,6 +31,9 @@ import torchaudio
 from dotenv import load_dotenv
 from rich.console import Console
 
+from cosimo_vapi.knowledge import TOOLS, Collection, run_tool
+from cosimo_vapi.persona import END_MARKER, FIRST_MESSAGE, LOCAL_SYSTEM_PROMPT
+
 console = Console()
 
 # Audio settings
@@ -346,169 +349,67 @@ class TextToSpeech:
 
 
 # ---------------------------------------------------------------------------
-# Local Knowledge Base (simple RAG)
-# ---------------------------------------------------------------------------
-
-class KnowledgeBase:
-    """Simple local knowledge base for museum collection."""
-
-    def __init__(self, collection_path: str = "data/collection_optimized.json"):
-        self.collection_path = collection_path
-        self.items = []
-        self._loaded = False
-
-    def load(self):
-        """Load collection from JSON file."""
-        if self._loaded:
-            return
-
-        path = Path(self.collection_path)
-        if not path.exists():
-            # Try other locations
-            for alt in ["data/collection.json", "collection.json"]:
-                if Path(alt).exists():
-                    path = Path(alt)
-                    break
-
-        if path.exists():
-            with open(path, 'r') as f:
-                data = json.load(f)
-                self.items = data.get("items", [])
-            console.print(f"  [dim]Loaded {len(self.items)} items from collection[/]")
-        else:
-            console.print("[yellow]No collection file found. Cosimo won't have artwork knowledge.[/]")
-
-        self._loaded = True
-
-    def search(self, query: str, max_results: int = 3) -> list[dict]:
-        """Simple keyword search through collection."""
-        self.load()
-
-        if not self.items:
-            return []
-
-        query_lower = query.lower()
-        query_words = set(query_lower.split())
-
-        scored_items = []
-        for item in self.items:
-            score = 0
-            searchable = " ".join([
-                str(item.get("title", "")),
-                str(item.get("artistName", "")),
-                str(item.get("description", "")),
-                str(item.get("period", "")),
-                str(item.get("medium", "")),
-                str(item.get("culture", "")),
-                str(item.get("room", "")),
-            ]).lower()
-
-            # Score based on word matches
-            for word in query_words:
-                if len(word) > 2 and word in searchable:
-                    score += 1
-                    # Bonus for title/artist match
-                    if word in str(item.get("title", "")).lower():
-                        score += 2
-                    if word in str(item.get("artistName", "")).lower():
-                        score += 2
-
-            if score > 0:
-                scored_items.append((score, item))
-
-        # Sort by score and return top results
-        scored_items.sort(key=lambda x: x[0], reverse=True)
-        return [item for score, item in scored_items[:max_results]]
-
-    def format_item(self, item: dict) -> str:
-        """Format an item for the LLM context."""
-        parts = []
-        if item.get("title"):
-            parts.append(f"Title: {item['title']}")
-        if item.get("artistName"):
-            parts.append(f"Artist: {item['artistName']}")
-        if item.get("period"):
-            parts.append(f"Period: {item['period']}")
-        if item.get("medium"):
-            parts.append(f"Medium: {item['medium']}")
-        if item.get("culture"):
-            parts.append(f"Culture: {item['culture']}")
-        if item.get("room"):
-            parts.append(f"Location: {item['room']}")
-        if item.get("description"):
-            # Truncate long descriptions
-            desc = item['description'][:500] + "..." if len(item['description']) > 500 else item['description']
-            parts.append(f"Description: {desc}")
-        return "\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# LLM using Ollama (local)
+# LLM using Ollama (local), with collection tools (UPGRADE_PLAN Phase B)
 # ---------------------------------------------------------------------------
 
 class LocalLLM:
-    """Chat with local LLM using Ollama."""
+    """Chat with a local LLM via Ollama. Persona + full catalog index in the system prompt;
+    get_artwork / search_collection tools for details."""
 
-    def __init__(self, model: str = "llama3.2", knowledge_base: KnowledgeBase = None):
+    MAX_TOOL_ROUNDS = 4
+
+    def __init__(self, model: str, collection: Collection, max_tokens: int = 200):
         self.model = model
-        self.knowledge_base = knowledge_base
+        self.collection = collection
+        self.max_tokens = max_tokens
         self.conversation_history = []
-        self._system_prompt = self._build_system_prompt()
-
-    def _build_system_prompt(self) -> str:
-        return """You are Cosimo, a friendly museum guide at the Kreb's Center.
-
-RULES:
-- Be VERY brief: 1 sentence only, max 20 words.
-- Speak naturally, no bullet points.
-- Use artwork info if provided. Don't invent details.
-- On goodbye/thanks, say brief farewell + [END_CONVERSATION]"""
+        self._system_prompt = (
+            LOCAL_SYSTEM_PROMPT
+            + "\n\nCOLLECTION CATALOG — every item in the building, one per line as "
+            "`id | title | artist | room | period`, grouped by room. Anything not listed here is NOT "
+            "in the collection. The catalog does not include culture, country, material or subject: "
+            "for any question about those, or about what is in a room, call search_collection first. "
+            "Call get_artwork(id) before stating any detail about an item (date, culture, medium, "
+            "origin, provenance), and only state details that the tool result contains.\n\n"
+            + collection.catalog_index()
+        )
+        # system prompt ≈ 10k tokens; Ollama's default context is far smaller
+        self._options = {"num_predict": max_tokens, "num_ctx": 16384}
 
     def chat(self, user_message: str) -> tuple[str, bool]:
         """Send message to LLM and get response. Returns (response, should_end)."""
         ollama_client = get_ollama()
 
-        # Search knowledge base for relevant context
-        context = ""
-        if self.knowledge_base:
-            results = self.knowledge_base.search(user_message)
-            if results:
-                context = "\n\nRelevant artwork information:\n"
-                for item in results:
-                    context += "\n---\n" + self.knowledge_base.format_item(item)
-
-        # Build messages
         messages = [{"role": "system", "content": self._system_prompt}]
-
-        # Add conversation history (keep last 10 exchanges)
         messages.extend(self.conversation_history[-20:])
-
-        # Add current message with context
-        full_message = user_message
-        if context:
-            full_message = f"{user_message}\n{context}"
-
-        messages.append({"role": "user", "content": full_message})
+        messages.append({"role": "user", "content": user_message})
 
         try:
-            response = ollama_client.chat(
-                model=self.model,
-                messages=messages,
-                options={"num_predict": 100}  # Limit response length for speed
-            )
-            assistant_message = response['message']['content']
+            assistant_message = ""
+            for _ in range(self.MAX_TOOL_ROUNDS + 1):
+                response = ollama_client.chat(
+                    model=self.model, messages=messages, tools=TOOLS, options=self._options,
+                )
+                msg = response["message"]
+                tool_calls = msg.get("tool_calls") or []
+                if not tool_calls:
+                    assistant_message = msg.get("content") or ""
+                    break
+                messages.append(msg)
+                for call in tool_calls:
+                    fn = call["function"]
+                    result = run_tool(self.collection, fn["name"], fn.get("arguments") or {})
+                    console.print(f"  [dim]tool {fn['name']}({fn.get('arguments')})[/]")
+                    messages.append({"role": "tool", "content": result, "tool_name": fn["name"]})
 
-            # Check for end conversation marker
-            should_end = "[END_CONVERSATION]" in assistant_message
-            assistant_message = assistant_message.replace("[END_CONVERSATION]", "").strip()
+            should_end = END_MARKER in assistant_message
+            assistant_message = assistant_message.replace(END_MARKER, "").strip()
 
-            # Also check for goodbye phrases
             goodbye_phrases = ["goodbye", "bye", "farewell", "take care", "see you"]
-            user_lower = user_message.lower()
-            if any(phrase in user_lower for phrase in goodbye_phrases):
+            if any(phrase in user_message.lower() for phrase in goodbye_phrases):
                 should_end = True
 
-            # Update history (without context to save tokens)
+            # history keeps only the spoken turns, not tool traffic
             self.conversation_history.append({"role": "user", "content": user_message})
             self.conversation_history.append({"role": "assistant", "content": assistant_message})
 
@@ -535,15 +436,18 @@ class CosimoLocal:
 
         self.wake_word = os.getenv("WAKE_WORD", "hey_cosimo")
         self.wake_word_model = os.getenv("WAKE_WORD_MODEL", "./hey_cosimo_weights.pt")
-        self.ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
-        self.tts_voice = os.getenv("TTS_VOICE", "en-US-GuyNeural")
+        self.ollama_model = os.getenv("LLM_MODEL") or os.getenv("OLLAMA_MODEL") or "llama3.2"
+        # .env now names a Kokoro voice (Phase C); interim edge-tts only accepts *Neural voices
+        voice = os.getenv("TTS_VOICE", "")
+        self.tts_voice = voice if voice.endswith("Neural") else "en-US-GuyNeural"
         self.collection_path = os.getenv("COLLECTION_PATH", "data/collection_optimized.json")
+        self.llm_max_tokens = int(os.getenv("LLM_MAX_TOKENS", "200"))
 
         self.wake_detector: WakeWordDetector | None = None
         self.stt: SpeechToText | None = None
         self.tts: TextToSpeech | None = None
         self.llm: LocalLLM | None = None
-        self.knowledge_base: KnowledgeBase | None = None
+        self.collection: Collection | None = None
 
         self._shutdown = False
         self._caffeinate: subprocess.Popen | None = None
@@ -575,8 +479,12 @@ class CosimoLocal:
         console.print()
 
         # Initialize components
-        self.knowledge_base = KnowledgeBase(self.collection_path)
-        self.knowledge_base.load()
+        self.collection = Collection(self.collection_path)
+        self.collection.build()
+        console.print(f"  [dim]Loaded {len(self.collection.items)} items from collection[/]")
+        if not self.collection.embeddings_available:
+            console.print("[yellow]  Embedding search unavailable (keyword search only). "
+                          "Run: ollama pull nomic-embed-text[/]")
 
         self.wake_detector = WakeWordDetector(
             wake_word=self.wake_word,
@@ -584,7 +492,9 @@ class CosimoLocal:
         )
         self.stt = SpeechToText()
         self.tts = TextToSpeech(voice=self.tts_voice)
-        self.llm = LocalLLM(model=self.ollama_model, knowledge_base=self.knowledge_base)
+        self.llm = LocalLLM(
+            model=self.ollama_model, collection=self.collection, max_tokens=self.llm_max_tokens,
+        )
 
         while not self._shutdown:
             try:
@@ -651,8 +561,7 @@ class CosimoLocal:
         self.llm.reset()
 
         # Greeting (short for faster start)
-        greeting = "Hello! I'm Cosimo. What would you like to know about?"
-        self.tts.speak(greeting)
+        self.tts.speak(FIRST_MESSAGE)
 
         silence_count = 0
         max_silence = 3  # End after 3 consecutive silences

@@ -26,7 +26,8 @@ dependencies = [
 # For FREE local version (no cloud costs!)
 local = [
     "faster-whisper>=1.0",  # Local speech-to-text (Whisper)
-    "ollama>=0.3",          # Local LLM
+    "ollama>=0.4",          # Local LLM + nomic-embed-text embeddings
+    "rank-bm25>=0.2",       # Lexical half of hybrid collection search
     "edge-tts>=6.1",        # Free Microsoft TTS
 ]
 # For Vapi cloud version (paid per-minute)
